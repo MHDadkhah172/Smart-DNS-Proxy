@@ -122,30 +122,3 @@ On successful validation:
 ```text
 Config loaded successfully.
 ```
-
----
-
-## Development Progress
-
-**Current Phase:** Phase 1 – Core Infrastructure
-
-**Completed:**
-- Project repository initialization.
-- Directory structure setup.
-- Configuration file design.
-- Configuration validation engine.
-
-**In Progress:**
-- Domain list loading and normalization.
-
-**Upcoming:**
-- Mock upstream DNS server.
-- UDP DNS proxy implementation.
-- DNS query interception and response routing.
-- DNS caching and error-handling improvements.
-
----
-
-## License
-
-License information has not yet been specified.
