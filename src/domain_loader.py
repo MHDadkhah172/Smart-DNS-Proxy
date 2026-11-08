@@ -54,19 +54,3 @@ def load_domain_list(file_path):
         sys.exit(1)
 
     return domains
-
-if __name__ == "__main__":
-    # Test script locally
-    import os
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    os.chdir(project_root)
-
-    test_ad_file = "ad_list.txt"
-    test_sanction_file = "sanction_list.txt"
-
-    print("Loading domain lists...")
-    ads = load_domain_list(test_ad_file)
-    sanctions = load_domain_list(test_sanction_file)
-
-    print(f"Loaded {len(ads)} unique ad domains.")
-    print(f"Loaded {len(sanctions)} unique sanction domains.")
