@@ -1,167 +1,263 @@
 import socket
 import sys
 import time
-import logging
+import struct
+from datetime import datetime
+from collections import OrderedDict
 from config import load_config
-from domain_loader import load_domain_list
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler("dns_proxy.log", encoding="utf-8"),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-
-
-def extract_domain(data):
-    """Extract domain name from DNS Question section."""
-    if len(data) < 12:
-        return None
-
-    labels = []
-    idx = 12
-
-    while idx < len(data):
-        length = data[idx]
-        if length == 0:
-            break
-        if (length & 0xC0) == 0xC0:
-            return None
-
-        idx += 1
-        if idx + length > len(data):
-            return None
-
-        labels.append(data[idx:idx + length].decode("utf-8", errors="ignore"))
-        idx += length
-
-    return ".".join(labels).lower()
+from domain_loader import is_valid_domain, normalize_domain, load_domain_list
 
 
 def is_domain_matched(domain, domain_set):
-    """Check exact match or parent domain match (Suffix Matching)."""
-    parts = domain.split(".")
-    for i in range(len(parts)):
-        candidate = ".".join(parts[i:])
-        if candidate in domain_set:
+    """Exact match or label-boundary suffix match (section 4)."""
+    if domain in domain_set:
+        return True
+    for entry in domain_set:
+        if domain.endswith("." + entry):
             return True
     return False
 
 
-def build_response(query_data, resolved_ip, ttl_val=60):
-    """Build a standard Type-A response with a specific IP."""
-    tx_id = query_data[:2]
-    flags = b"\x81\x80"
-    counts = b"\x00\x01\x00\x01\x00\x00\x00\x00"
-
-    idx = 12
-    while idx < len(query_data) and query_data[idx] != 0:
-        idx += 1 + query_data[idx]
-    idx += 5
-
-    question_section = query_data[12:idx]
-
-    name_ptr = b"\xc0\x0c"
-    type_class = b"\x00\x01\x00\x01"
-    ttl = int(ttl_val).to_bytes(4, byteorder="big")
-    rdlength = b"\x00\x04"
-    rdata = socket.inet_aton(resolved_ip)
-
-    answer = name_ptr + type_class + ttl + rdlength + rdata
-    return tx_id + flags + counts + question_section + answer
-
-
-def forward_to_upstream(query_data, upstream_ip, upstream_port, timeout=2.0):
-    """Forward query to upstream DNS server and return the response."""
-    upstream_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    upstream_sock.settimeout(timeout)
-
+def query_text_upstream(domain, upstream_ip, upstream_port, timeout_sec):
+    """Mandatory text-based UDP protocol (section 6.2)."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout_sec)
     try:
-        upstream_sock.sendto(query_data, (upstream_ip, upstream_port))
-        response, _ = upstream_sock.recvfrom(512)
-        return response
-    except socket.timeout:
-        logging.warning(f"Upstream {upstream_ip}:{upstream_port} timed out.")
-        return None
-    except Exception as e:
-        logging.error(f"Upstream communication failed: {e}")
-        return None
+        msg = f"QUERY {domain}".encode("utf-8")
+        sock.sendto(msg, (upstream_ip, upstream_port))
+        data, _ = sock.recvfrom(1024)
+        reply = data.decode("utf-8", errors="ignore").strip()
+
+        if reply == "NOT_FOUND":
+            return "NOT_FOUND", "-", "-"
+
+        parts = reply.split()
+        if len(parts) == 3 and parts[0] == "OK":
+            ip = parts[1]
+            ttl = int(parts[2])
+            return "OK", ip, ttl
+
+        return "SERVER_ERROR", "-", "-"
+    except Exception:
+        return "SERVER_ERROR", "-", "-"
     finally:
-        upstream_sock.close()
+        sock.close()
 
 
-def start_proxy(listen_ip="127.0.0.1", listen_port=8053):
-    """Start the main DNS proxy server."""
-    cfg = load_config()
+def query_real_dns(domain, upstream_ip, upstream_port, timeout_sec):
+    """Bonus B6: Real binary DNS query over UDP (e.g., 8.8.8.8:53)."""
+    tx_id = b"\x1a\x2b"
+    flags = b"\x01\x00"  # Standard recursive query
+    counts = b"\x00\x01\x00\x00\x00\x00\x00\x00"
+    qname = b"".join(bytes([len(p)]) + p.encode("utf-8") for p in domain.split(".")) + b"\x00"
+    packet = tx_id + flags + counts + qname + b"\x00\x01\x00\x01"
 
-    ad_domains = load_domain_list(cfg["ad_list_file"])
-    sanction_domains = load_domain_list(cfg["sanction_list_file"])
-    logging.info(f"Loaded {len(ad_domains)} ad domains, {len(sanction_domains)} sanction domains.")
-
-    upstream_ip = cfg["upstream_ip"]
-    upstream_port = cfg["upstream_port"]
-    timeout_sec = float(cfg.get("upstream_timeout_sec", 2))
-    sinkhole_ip = cfg["sinkhole_ip"]
-    sanction_redirect_ip = cfg["proxy_ip"]
-    ttl_val = int(cfg.get("local_ttl", 60))
-    cache_enabled = str(cfg.get("cache_enabled", "true")).lower() == "true"
-
-    dns_cache = {}
-
-    server_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout_sec)
     try:
-        server_sock.bind((listen_ip, listen_port))
-        logging.info(f"DNS Proxy is running on {listen_ip}:{listen_port} (Cache: {cache_enabled}, TTL: {ttl_val}s)")
-    except Exception as e:
-        logging.critical(f"Failed to bind proxy to {listen_ip}:{listen_port}: {e}")
+        sock.sendto(packet, (upstream_ip, upstream_port))
+        resp, _ = sock.recvfrom(512)
+        if len(resp) < 12:
+            return "SERVER_ERROR", "-", "-"
+
+        rcode = resp[3] & 0x0F
+        if rcode == 3:  # NXDOMAIN
+            return "NOT_FOUND", "-", "-"
+        if rcode != 0:
+            return "SERVER_ERROR", "-", "-"
+
+        ancount = struct.unpack("!H", resp[6:8])[0]
+        if ancount == 0:
+            return "NOT_FOUND", "-", "-"
+
+        # Skip Question section
+        idx = 12
+        while idx < len(resp) and resp[idx] != 0:
+            idx += 1 + resp[idx]
+        idx += 5
+
+        # Parse Answer records to find first Type-A (IPv4)
+        for _ in range(ancount):
+            if idx >= len(resp):
+                break
+            if (resp[idx] & 0xC0) == 0xC0:
+                idx += 2
+            else:
+                while idx < len(resp) and resp[idx] != 0:
+                    idx += 1 + resp[idx]
+                idx += 1
+
+            if idx + 10 > len(resp):
+                break
+            rtype, rclass, ttl, rdlength = struct.unpack("!HHIH", resp[idx:idx + 10])
+            idx += 10
+            if rtype == 1 and rclass == 1 and rdlength == 4 and idx + 4 <= len(resp):
+                ip = socket.inet_ntoa(resp[idx:idx + 4])
+                return "OK", ip, ttl
+            idx += rdlength
+
+        return "NOT_FOUND", "-", "-"
+    except Exception:
+        return "SERVER_ERROR", "-", "-"
+    finally:
+        sock.close()
+
+
+def append_log(domain_str, source, status, ip, ttl):
+    """Bonus B4: Append structured line to log.txt."""
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"{now_str} | {domain_str} | {source} | {status} | {ip} | {ttl}\n"
+    with open("log.txt", "a", encoding="utf-8") as f:
+        f.write(line)
+
+
+def print_result_block(domain_str, source, status, ip, ttl):
+    """Print exact 5-line output block followed by an empty line (section 6.1)."""
+    print(f"Domain: {domain_str}")
+    print(f"Source: {source}")
+    print(f"Status: {status}")
+    print(f"IP: {ip}")
+    print(f"TTL: {ttl}")
+    print()
+    append_log(domain_str, source, status, ip, ttl)
+
+
+def main():
+    try:
+        cfg = load_config("config.txt")
+        ad_domains = load_domain_list(cfg["ad_list_file"])
+        sanction_domains = load_domain_list(cfg["sanction_list_file"])
+    except ValueError as e:
+        print(e)
         sys.exit(1)
 
-    try:
-        while True:
-            data, client_addr = server_sock.recvfrom(512)
-            domain = extract_domain(data)
+    # OrderedDict for FIFO eviction (Bonus B5)
+    cache = OrderedDict()
 
-            if not domain:
-                continue
+    # Statistics counters (Bonus B1)
+    stats = {
+        "Total": 0,
+        "AD_BLOCK": 0,
+        "SANCTION": 0,
+        "CACHE": 0,
+        "UPSTREAM": 0,
+        "ERRORS": 0,
+    }
 
-            tx_id = data[:2]
+    print("DNS Proxy ready.")
 
-            if is_domain_matched(domain, ad_domains):
-                logging.info(f"[BLOCK - AD] {domain} -> {sinkhole_ip}")
-                resp = build_response(data, sinkhole_ip, ttl_val)
-                server_sock.sendto(resp, client_addr)
+    while True:
+        try:
+            raw_line = input("Enter domain (or exit): ")
+        except EOFError:
+            print("Bye.")
+            break
 
-            elif is_domain_matched(domain, sanction_domains):
-                logging.info(f"[REDIRECT - SANCTION] {domain} -> {sanction_redirect_ip}")
-                resp = build_response(data, sanction_redirect_ip, ttl_val)
-                server_sock.sendto(resp, client_addr)
+        user_input = raw_line.strip()
+        cmd = user_input.lower()
 
+        # Exit command
+        if cmd == "exit":
+            print("Bye.")
+            break
+
+        # Bonus B1: stats command
+        if cmd == "stats":
+            print(
+                f"Total: {stats['Total']} | AD_BLOCK: {stats['AD_BLOCK']} | "
+                f"SANCTION: {stats['SANCTION']} | CACHE: {stats['CACHE']} | "
+                f"UPSTREAM: {stats['UPSTREAM']} | ERRORS: {stats['ERRORS']}"
+            )
+            print()
+            continue
+
+        # Bonus B2: reload command
+        if cmd == "reload":
+            try:
+                ad_domains = load_domain_list(cfg["ad_list_file"])
+                sanction_domains = load_domain_list(cfg["sanction_list_file"])
+                print("Lists reloaded.")
+            except ValueError as e:
+                print(e)
+            print()
+            continue
+
+        # Bonus B3: cache command
+        if cmd == "cache":
+            now = time.time()
+            expired_keys = [k for k, (_, exp) in cache.items() if int(exp - now) < 1]
+            for k in expired_keys:
+                del cache[k]
+
+            if not cache:
+                print("Cache is empty.")
             else:
-                now = time.time()
-                if cache_enabled and domain in dns_cache:
-                    cached_resp, expire_time = dns_cache[domain]
-                    if now < expire_time:
-                        final_resp = tx_id + cached_resp[2:]
-                        logging.info(f"[CACHE HIT] {domain} (Remaining TTL: {int(expire_time - now)}s)")
-                        server_sock.sendto(final_resp, client_addr)
-                        continue
-                    else:
-                        del dns_cache[domain]
+                for dom, (cached_ip, exp) in cache.items():
+                    rem_ttl = int(exp - now)
+                    print(f"{dom} | {cached_ip} | {rem_ttl}")
+            print()
+            continue
 
-                logging.info(f"[FORWARD] {domain} -> Upstream ({upstream_ip}:{upstream_port})")
-                upstream_resp = forward_to_upstream(data, upstream_ip, upstream_port, timeout_sec)
-                if upstream_resp:
-                    if cache_enabled:
-                        dns_cache[domain] = (upstream_resp, now + ttl_val)
-                    server_sock.sendto(upstream_resp, client_addr)
+        # Domain request processing
+        stats["Total"] += 1
 
-    except KeyboardInterrupt:
-        logging.info("Stopping DNS Proxy.")
-    finally:
-        server_sock.close()
+        if not is_valid_domain(user_input):
+            stats["ERRORS"] += 1
+            disp_name = "(empty)" if user_input == "" else user_input
+            print_result_block(disp_name, "NONE", "INVALID_INPUT", "-", "-")
+            continue
+
+        domain = normalize_domain(user_input)
+
+        # 1. Ad list check
+        if is_domain_matched(domain, ad_domains):
+            stats["AD_BLOCK"] += 1
+            print_result_block(domain, "AD_BLOCK", "OK", cfg["sinkhole_ip"], cfg["local_ttl"])
+            continue
+
+        # 2. Sanction list check
+        if is_domain_matched(domain, sanction_domains):
+            stats["SANCTION"] += 1
+            print_result_block(domain, "SANCTION", "OK", cfg["proxy_ip"], cfg["local_ttl"])
+            continue
+
+        # 3. Cache check (if enabled)
+        now = time.time()
+        if cfg["cache_enabled"] and domain in cache:
+            cached_ip, expire_time = cache[domain]
+            rem_ttl = int(expire_time - now)
+            if rem_ttl >= 1:
+                stats["CACHE"] += 1
+                print_result_block(domain, "CACHE", "OK", cached_ip, rem_ttl)
+                continue
+            else:
+                del cache[domain]
+
+        # 4. Upstream query (Text mock or Real DNS B6)
+        if cfg["real_dns_enabled"]:
+            status, ip, ttl = query_real_dns(
+                domain, cfg["upstream_ip"], cfg["upstream_port"], cfg["upstream_timeout_sec"]
+            )
+        else:
+            status, ip, ttl = query_text_upstream(
+                domain, cfg["upstream_ip"], cfg["upstream_port"], cfg["upstream_timeout_sec"]
+            )
+
+        if status == "OK":
+            stats["UPSTREAM"] += 1
+            if cfg["cache_enabled"] and isinstance(ttl, int) and ttl > 0:
+                max_cap = cfg["cache_max_entries"]
+                if max_cap is not None and domain not in cache and len(cache) >= max_cap:
+                    cache.popitem(last=False)  # FIFO eviction (Bonus B5)
+                cache[domain] = (ip, time.time() + ttl)
+            print_result_block(domain, "UPSTREAM", "OK", ip, ttl)
+        elif status == "NOT_FOUND":
+            stats["UPSTREAM"] += 1
+            print_result_block(domain, "UPSTREAM", "NOT_FOUND", "-", "-")
+        else:
+            stats["ERRORS"] += 1
+            print_result_block(domain, "UPSTREAM", "SERVER_ERROR", "-", "-")
 
 
 if __name__ == "__main__":
-    start_proxy()
+    main()
