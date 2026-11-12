@@ -2,3 +2,11 @@
 2026-11-12 16:22:38,532 [INFO] DNS Proxy is running on 127.0.0.1:8053 (Cache: True, TTL: 60s)
 2026-11-12 16:22:54,540 [INFO] [FORWARD] google.com -> Upstream (127.0.0.1:5354)
 2026-11-12 16:23:02,520 [INFO] [BLOCK - AD] sub.ads.example.com -> 0.0.0.0
+2026-11-12 16:36:40,282 [INFO] Loaded 3 ad domains, 2 sanction domains.
+2026-11-12 16:36:40,283 [INFO] DNS Proxy is running on 127.0.0.1:8053 (Cache: True, TTL: 60s)
+2026-11-12 16:36:44,318 [INFO] [BLOCK - AD] ads.example.com -> 0.0.0.0
+2026-11-12 16:36:44,318 [INFO] [BLOCK - AD] banner.tracker.example.net -> 0.0.0.0
+2026-11-12 16:36:44,321 [INFO] [REDIRECT - SANCTION] service.example.org -> 192.0.2.10
+2026-11-12 16:36:44,321 [INFO] [BLOCK - AD] both.example.com -> 0.0.0.0
+2026-11-12 16:36:44,322 [INFO] [FORWARD] github.com -> Upstream (127.0.0.1:5354)
+2026-11-12 16:36:44,323 [INFO] [CACHE HIT] github.com (Remaining TTL: 59s)

@@ -1,86 +1,93 @@
 import os
-import sys
-import ipaddress
-
-REQUIRED_KEYS = [
-    "upstream_ip", "upstream_port", "sinkhole_ip",
-    "proxy_ip", "ad_list_file", "sanction_list_file"
-]
+import socket
 
 
 def is_valid_ipv4(ip_str):
-    """Validate IPv4 address format."""
     try:
-        ipaddress.IPv4Address(ip_str)
-        return True
-    except ValueError:
+        socket.inet_aton(ip_str)
+        return len(ip_str.split(".")) == 4
+    except socket.error:
         return False
 
 
-def load_config(file_path="config.txt"):
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    os.chdir(project_root)
+def load_config(filepath="config.txt"):
+    if not os.path.exists(filepath):
+        raise ValueError(f"Config error: {filepath} not found.")
 
-    # Check config file existence
-    if not os.path.isfile(file_path):
-        print(f"Config error: File '{file_path}' not found.")
-        sys.exit(1)
+    raw_cfg = {}
+    with open(filepath, "r", encoding="utf-8") as f:
+        for line_num, line in enumerate(f, 1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                raise ValueError(f"Config error: invalid syntax at line {line_num}.")
+            key, val = line.split("=", 1)
+            raw_cfg[key.strip()] = val.strip()
 
-    # Default settings
-    config = {
-        "upstream_timeout_sec": 2,
-        "local_ttl": 60,
-        "cache_enabled": True
-    }
+    required_keys = [
+        "upstream_ip", "upstream_port", "sinkhole_ip",
+        "proxy_ip", "ad_list_file", "sanction_list_file"
+    ]
+    for key in required_keys:
+        if key not in raw_cfg or not raw_cfg[key]:
+            raise ValueError(f"Config error: missing required key '{key}'.")
 
-    # Parse key-value pairs
+    if not is_valid_ipv4(raw_cfg["upstream_ip"]):
+        raise ValueError("Config error: invalid upstream_ip.")
+    if not is_valid_ipv4(raw_cfg["sinkhole_ip"]):
+        raise ValueError("Config error: invalid sinkhole_ip.")
+    if not is_valid_ipv4(raw_cfg["proxy_ip"]):
+        raise ValueError("Config error: invalid proxy_ip.")
+
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
+        upstream_port = int(raw_cfg["upstream_port"])
+        if not (1 <= upstream_port <= 65535):
+            raise ValueError
+    except ValueError:
+        raise ValueError("Config error: invalid upstream_port.")
 
-                key, val = [x.strip() for x in line.split("=", 1)]
+    try:
+        timeout_sec = float(raw_cfg.get("upstream_timeout_sec", "2"))
+        if timeout_sec <= 0:
+            raise ValueError
+    except ValueError:
+        raise ValueError("Config error: invalid upstream_timeout_sec.")
 
-                if key in ["upstream_port", "upstream_timeout_sec", "local_ttl"]:
-                    config[key] = int(val)
-                elif key == "cache_enabled":
-                    config[key] = (val.lower() == "true")
-                else:
-                    config[key] = val
+    try:
+        local_ttl = int(raw_cfg.get("local_ttl", "60"))
+        if local_ttl <= 0:
+            raise ValueError
+    except ValueError:
+        raise ValueError("Config error: invalid local_ttl.")
 
-    except Exception:
-        print(f"Config error: Invalid value format in '{file_path}'.")
-        sys.exit(1)
+    cache_str = raw_cfg.get("cache_enabled", "true").lower()
+    if cache_str not in ("true", "false"):
+        raise ValueError("Config error: cache_enabled must be true or false.")
 
-    # 1. Validate required keys
-    for req in REQUIRED_KEYS:
-        if req not in config:
-            print(f"Config error: Missing key '{req}'.")
-            sys.exit(1)
+    real_dns_str = raw_cfg.get("real_dns_enabled", "false").lower()
+    if real_dns_str not in ("true", "false"):
+        raise ValueError("Config error: real_dns_enabled must be true or false.")
 
-    # 2. Validate port range (1-65535)
-    if not (1 <= config["upstream_port"] <= 65535):
-        print("Config error: Invalid upstream port range.")
-        sys.exit(1)
+    cache_max = None
+    if "cache_max_entries" in raw_cfg and raw_cfg["cache_max_entries"]:
+        try:
+            cache_max = int(raw_cfg["cache_max_entries"])
+            if cache_max <= 0:
+                raise ValueError
+        except ValueError:
+            raise ValueError("Config error: invalid cache_max_entries.")
 
-    # 3. Validate IPv4 addresses
-    for ip_key in ["upstream_ip", "sinkhole_ip", "proxy_ip"]:
-        if not is_valid_ipv4(config[ip_key]):
-            print(f"Config error: Invalid IPv4 address for '{ip_key}'.")
-            sys.exit(1)
-
-    # 4. Validate domain list files existence
-    for list_key in ["ad_list_file", "sanction_list_file"]:
-        path = config[list_key]
-        if not os.path.isfile(path):
-            print(f"Config error: List file '{path}' not found or is not a file.")
-            sys.exit(1)
-
-    return config
-
-
-if __name__ == "__main__":
-    cfg = load_config()
-    print("Config loaded successfully.")
+    return {
+        "upstream_ip": raw_cfg["upstream_ip"],
+        "upstream_port": upstream_port,
+        "upstream_timeout_sec": timeout_sec,
+        "sinkhole_ip": raw_cfg["sinkhole_ip"],
+        "proxy_ip": raw_cfg["proxy_ip"],
+        "local_ttl": local_ttl,
+        "ad_list_file": raw_cfg["ad_list_file"],
+        "sanction_list_file": raw_cfg["sanction_list_file"],
+        "cache_enabled": cache_str == "true",
+        "cache_max_entries": cache_max,
+        "real_dns_enabled": real_dns_str == "true",
+    }
