@@ -2,6 +2,16 @@ import os
 import socket
 
 
+def resolve_path(filename):
+    """Find file in current directory or parent directory (project root)."""
+    if os.path.exists(filename):
+        return filename
+    parent_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", filename)
+    if os.path.exists(parent_path):
+        return os.path.normpath(parent_path)
+    return filename
+
+
 def is_valid_ipv4(ip_str):
     try:
         socket.inet_aton(ip_str)
@@ -11,6 +21,7 @@ def is_valid_ipv4(ip_str):
 
 
 def load_config(filepath="config.txt"):
+    filepath = resolve_path(filepath)
     if not os.path.exists(filepath):
         raise ValueError(f"Config error: {filepath} not found.")
 

@@ -1,0 +1,16 @@
+2026-11-12 18:51:28 | ads.example.com | AD_BLOCK | OK | 0.0.0.0 | 60
+2026-11-12 18:51:40 | sub.ads.example.com | AD_BLOCK | OK | 0.0.0.0 | 60
+2026-11-12 18:51:47 | ads.example.com | AD_BLOCK | OK | 0.0.0.0 | 60
+2026-11-12 18:51:54 | notads.example.com | UPSTREAM | OK | 198.51.100.7 | 5
+2026-11-12 18:52:03 | service.example.org | SANCTION | OK | 192.0.2.10 | 60
+2026-11-12 18:52:08 | both.example.com | AD_BLOCK | OK | 0.0.0.0 | 60
+2026-11-12 18:52:21 | normal.example.net | UPSTREAM | OK | 198.51.100.7 | 5
+2026-11-12 18:52:31 | normal.example.net | UPSTREAM | OK | 198.51.100.7 | 5
+2026-11-12 18:52:48 | normal.example.net | UPSTREAM | OK | 198.51.100.7 | 5
+2026-11-12 18:52:51 | normal.example.net | CACHE | OK | 198.51.100.7 | 1
+2026-11-12 18:53:21 | normal.example.net | UPSTREAM | OK | 198.51.100.7 | 5
+2026-11-12 18:53:38 | missing.example.net | UPSTREAM | NOT_FOUND | - | -
+2026-11-12 18:53:39 | missing.example.net | UPSTREAM | NOT_FOUND | - | -
+2026-11-12 18:54:05 | (empty) | NONE | INVALID_INPUT | - | -
+2026-11-12 18:54:29 | other.example.net | UPSTREAM | SERVER_ERROR | - | -
+2026-11-12 18:54:39 | ads.example.com | AD_BLOCK | OK | 0.0.0.0 | 60
