@@ -14,3 +14,10 @@
 2026-11-12 18:54:05 | (empty) | NONE | INVALID_INPUT | - | -
 2026-11-12 18:54:29 | other.example.net | UPSTREAM | SERVER_ERROR | - | -
 2026-11-12 18:54:39 | ads.example.com | AD_BLOCK | OK | 0.0.0.0 | 60
+2026-11-18 05:42:11 | www.google.com | UPSTREAM | SERVER_ERROR | - | -
+2026-11-18 05:43:15 | www.google.com | UPSTREAM | OK | 142.251.151.119 | 5
+2026-11-18 05:43:21 | www.google.com | UPSTREAM | OK | 216.239.38.120 | 238
+2026-11-18 05:43:30 | www.google.com | CACHE | OK | 216.239.38.120 | 228
+2026-11-18 05:43:31 | www.google.com | CACHE | OK | 216.239.38.120 | 227
+2026-11-18 05:43:33 | www.google.com | CACHE | OK | 216.239.38.120 | 225
+2026-11-18 05:43:40 | www.google.com | CACHE | OK | 216.239.38.120 | 218
