@@ -8,6 +8,17 @@ from config import load_config
 from domain_loader import is_valid_domain, normalize_domain, load_domain_list
 
 
+
+import os
+import sys
+
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+from smart_modules import UpstreamRouter, RemoteBlocklistSync, AdaptiveAdCache
+
+
 def is_domain_matched(domain, domain_set):
     """Exact match or label-boundary suffix match (section 4)."""
     if domain in domain_set:
