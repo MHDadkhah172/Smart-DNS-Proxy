@@ -89,6 +89,16 @@ def load_config(filepath="config.txt"):
         except ValueError:
             raise ValueError("Config error: invalid cache_max_entries.")
 
+    context_ads_str = raw_cfg.get("context_ads_enabled", "false").lower()
+    if context_ads_str not in ("true", "false"):
+        raise ValueError("Config error: context_ads_enabled must be true or false.")
+
+    upstream_pool = raw_cfg.get("upstream_pool", raw_cfg["upstream_ip"]).strip()
+    for srv in upstream_pool.split(","):
+        srv = srv.strip()
+        if srv and not is_valid_ipv4(srv):
+            raise ValueError(f"Config error: invalid IP '{srv}' in upstream_pool.")
+
     return {
         "upstream_ip": raw_cfg["upstream_ip"],
         "upstream_port": upstream_port,
@@ -101,4 +111,7 @@ def load_config(filepath="config.txt"):
         "cache_enabled": cache_str == "true",
         "cache_max_entries": cache_max,
         "real_dns_enabled": real_dns_str == "true",
+        "upstream_pool": upstream_pool,
+        "remote_ad_list_url": raw_cfg.get("remote_ad_list_url", "").strip(),
+        "context_ads_enabled": context_ads_str == "true",
     }

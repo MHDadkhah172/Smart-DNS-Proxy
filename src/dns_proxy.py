@@ -1,26 +1,22 @@
+import os
 import socket
+import struct
 import sys
 import time
-import struct
-from datetime import datetime
 from collections import OrderedDict
-from config import load_config
-from domain_loader import is_valid_domain, normalize_domain, load_domain_list
-
-
-
-import os
-import sys
+from datetime import datetime
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from smart_modules import UpstreamRouter, RemoteBlocklistSync, AdaptiveAdCache
+from config import load_config
+from domain_loader import is_valid_domain, load_domain_list, normalize_domain
+from smart_modules import AdaptiveAdCache, RemoteBlocklistSync, UpstreamRouter
 
 
 def is_domain_matched(domain, domain_set):
-    """Exact match or label-boundary suffix match (section 4)."""
+    """Exact match or label-boundary suffix match."""
     if domain in domain_set:
         return True
     for entry in domain_set:
@@ -30,7 +26,7 @@ def is_domain_matched(domain, domain_set):
 
 
 def query_text_upstream(domain, upstream_ip, upstream_port, timeout_sec):
-    """Mandatory text-based UDP protocol (section 6.2)."""
+    """Mandatory text-based UDP protocol."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(timeout_sec)
     try:
@@ -56,7 +52,7 @@ def query_text_upstream(domain, upstream_ip, upstream_port, timeout_sec):
 
 
 def query_real_dns(domain, upstream_ip, upstream_port, timeout_sec):
-    """Bonus B6: Real binary DNS query over UDP (e.g., 8.8.8.8:53)."""
+    """Real binary DNS query over UDP (e.g., 8.8.8.8:53)."""
     tx_id = b"\x1a\x2b"
     flags = b"\x01\x00"  # Standard recursive query
     counts = b"\x00\x01\x00\x00\x00\x00\x00\x00"
@@ -115,7 +111,7 @@ def query_real_dns(domain, upstream_ip, upstream_port, timeout_sec):
 
 
 def append_log(domain_str, source, status, ip, ttl):
-    """Bonus B4: Append structured line to log.txt."""
+    """Append structured line to log.txt."""
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"{now_str} | {domain_str} | {source} | {status} | {ip} | {ttl}\n"
     with open("log.txt", "a", encoding="utf-8") as f:
@@ -123,7 +119,7 @@ def append_log(domain_str, source, status, ip, ttl):
 
 
 def print_result_block(domain_str, source, status, ip, ttl):
-    """Print exact 5-line output block followed by an empty line (section 6.1)."""
+    """Print exact 5-line output block followed by an empty line."""
     print(f"Domain: {domain_str}")
     print(f"Source: {source}")
     print(f"Status: {status}")
@@ -131,6 +127,71 @@ def print_result_block(domain_str, source, status, ip, ttl):
     print(f"TTL: {ttl}")
     print()
     append_log(domain_str, source, status, ip, ttl)
+
+
+def resolve_domain(
+    raw_domain,
+    cfg,
+    ad_domains,
+    sanction_domains,
+    cache,
+    stats,
+    router,
+    ad_cache,
+    query_fn,
+    session_id=None,
+):
+    """Core resolution pipeline usable by both CLI loop and multi-user simulator."""
+    stats["Total"] += 1
+
+    if not is_valid_domain(raw_domain):
+        stats["ERRORS"] += 1
+        disp_name = "(empty)" if raw_domain == "" else raw_domain
+        return disp_name, "NONE", "INVALID_INPUT", "-", "-"
+
+    domain = normalize_domain(raw_domain)
+
+    # 1. Ad list check (L1 Hot Cache first, then full synced ad_domains)
+    if ad_cache.is_hot_ad(domain, session_id=session_id) or is_domain_matched(domain, ad_domains):
+        ad_cache.promote(domain, session_id=session_id)
+        stats["AD_BLOCK"] += 1
+        return domain, "AD_BLOCK", "OK", cfg["sinkhole_ip"], cfg["local_ttl"]
+
+    # 2. Sanction list check
+    if is_domain_matched(domain, sanction_domains):
+        stats["SANCTION"] += 1
+        return domain, "SANCTION", "OK", cfg["proxy_ip"], cfg["local_ttl"]
+
+    # 3. Cache check (if enabled)
+    now = time.time()
+    if cfg["cache_enabled"] and domain in cache:
+        cached_ip, expire_time = cache[domain]
+        rem_ttl = int(expire_time - now)
+        if rem_ttl >= 1:
+            stats["CACHE"] += 1
+            return domain, "CACHE", "OK", cached_ip, rem_ttl
+        del cache[domain]
+
+    # 4. Upstream query via Smart Latency-Aware Pool
+    status, ip, ttl = router.query_smart_pool(
+        domain, query_fn, cfg["upstream_port"], cfg["upstream_timeout_sec"]
+    )
+
+    if status == "OK":
+        stats["UPSTREAM"] += 1
+        if cfg["cache_enabled"] and isinstance(ttl, int) and ttl > 0:
+            max_cap = cfg["cache_max_entries"]
+            if max_cap is not None and domain not in cache and len(cache) >= max_cap:
+                cache.popitem(last=False)  # FIFO eviction
+            cache[domain] = (ip, time.time() + ttl)
+        return domain, "UPSTREAM", "OK", ip, ttl
+
+    if status == "NOT_FOUND":
+        stats["UPSTREAM"] += 1
+        return domain, "UPSTREAM", "NOT_FOUND", "-", "-"
+
+    stats["ERRORS"] += 1
+    return domain, "UPSTREAM", "SERVER_ERROR", "-", "-"
 
 
 def main():
@@ -142,10 +203,31 @@ def main():
         print(e)
         sys.exit(1)
 
-    # OrderedDict for FIFO eviction (Bonus B5)
-    cache = OrderedDict()
+    query_fn = query_real_dns if cfg["real_dns_enabled"] else query_text_upstream
 
-    # Statistics counters (Bonus B1)
+    # 1. Initialize Smart Upstream Router & benchmark at startup
+    pool_raw = cfg.get("upstream_pool", cfg["upstream_ip"])
+    pool = [s.strip() for s in pool_raw.split(",") if s.strip()]
+    router = UpstreamRouter(pool)
+    if cfg["real_dns_enabled"]:
+        router.benchmark_all(query_fn=query_fn, port=cfg["upstream_port"], timeout=1.5)
+
+    # 2. Initialize Remote Blocklist Sync (initial sync + 24h background thread)
+    remote_syncer = RemoteBlocklistSync(
+        url=cfg.get("remote_ad_list_url", "").strip(),
+        validator_fn=is_valid_domain,
+        normalizer_fn=normalize_domain,
+    )
+    if remote_syncer.url:
+        remote_syncer.sync_now(ad_domains)
+        remote_syncer.start_background_sync(ad_domains)
+
+    # 3. Initialize Multi-Session Adaptive Ad Cache
+    ad_cache = AdaptiveAdCache(
+        enabled=str(cfg.get("context_ads_enabled", "false")).lower() == "true"
+    )
+
+    cache = OrderedDict()
     stats = {
         "Total": 0,
         "AD_BLOCK": 0,
@@ -161,18 +243,18 @@ def main():
         try:
             raw_line = input("Enter domain (or exit): ")
         except EOFError:
+            remote_syncer.stop()
             print("Bye.")
             break
 
         user_input = raw_line.strip()
         cmd = user_input.lower()
 
-        # Exit command
         if cmd == "exit":
+            remote_syncer.stop()
             print("Bye.")
             break
 
-        # Bonus B1: stats command
         if cmd == "stats":
             print(
                 f"Total: {stats['Total']} | AD_BLOCK: {stats['AD_BLOCK']} | "
@@ -182,18 +264,19 @@ def main():
             print()
             continue
 
-        # Bonus B2: reload command
         if cmd == "reload":
             try:
                 ad_domains = load_domain_list(cfg["ad_list_file"])
                 sanction_domains = load_domain_list(cfg["sanction_list_file"])
+                if remote_syncer.url:
+                    remote_syncer.sync_now(ad_domains)
+                ad_cache.clear_all()
                 print("Lists reloaded.")
             except ValueError as e:
                 print(e)
             print()
             continue
 
-        # Bonus B3: cache command
         if cmd == "cache":
             now = time.time()
             expired_keys = [k for k, (_, exp) in cache.items() if int(exp - now) < 1]
@@ -209,65 +292,21 @@ def main():
             print()
             continue
 
-        # Domain request processing
-        stats["Total"] += 1
-
-        if not is_valid_domain(user_input):
-            stats["ERRORS"] += 1
-            disp_name = "(empty)" if user_input == "" else user_input
-            print_result_block(disp_name, "NONE", "INVALID_INPUT", "-", "-")
+        if cmd.startswith("user "):
+            ad_cache.switch_session(user_input.split(" ", 1)[1])
+            print(f"Switched session to: {ad_cache.current_session}\n")
             continue
 
-        domain = normalize_domain(user_input)
-
-        # 1. Ad list check
-        if is_domain_matched(domain, ad_domains):
-            stats["AD_BLOCK"] += 1
-            print_result_block(domain, "AD_BLOCK", "OK", cfg["sinkhole_ip"], cfg["local_ttl"])
+        if cmd == "smart_stats":
+            print("Latencies (ms):", {k: round(v, 2) for k, v in router.latencies.items()})
+            print("User Hits:", ad_cache.hits)
+            print()
             continue
 
-        # 2. Sanction list check
-        if is_domain_matched(domain, sanction_domains):
-            stats["SANCTION"] += 1
-            print_result_block(domain, "SANCTION", "OK", cfg["proxy_ip"], cfg["local_ttl"])
-            continue
-
-        # 3. Cache check (if enabled)
-        now = time.time()
-        if cfg["cache_enabled"] and domain in cache:
-            cached_ip, expire_time = cache[domain]
-            rem_ttl = int(expire_time - now)
-            if rem_ttl >= 1:
-                stats["CACHE"] += 1
-                print_result_block(domain, "CACHE", "OK", cached_ip, rem_ttl)
-                continue
-            else:
-                del cache[domain]
-
-        # 4. Upstream query (Text mock or Real DNS B6)
-        if cfg["real_dns_enabled"]:
-            status, ip, ttl = query_real_dns(
-                domain, cfg["upstream_ip"], cfg["upstream_port"], cfg["upstream_timeout_sec"]
-            )
-        else:
-            status, ip, ttl = query_text_upstream(
-                domain, cfg["upstream_ip"], cfg["upstream_port"], cfg["upstream_timeout_sec"]
-            )
-
-        if status == "OK":
-            stats["UPSTREAM"] += 1
-            if cfg["cache_enabled"] and isinstance(ttl, int) and ttl > 0:
-                max_cap = cfg["cache_max_entries"]
-                if max_cap is not None and domain not in cache and len(cache) >= max_cap:
-                    cache.popitem(last=False)  # FIFO eviction (Bonus B5)
-                cache[domain] = (ip, time.time() + ttl)
-            print_result_block(domain, "UPSTREAM", "OK", ip, ttl)
-        elif status == "NOT_FOUND":
-            stats["UPSTREAM"] += 1
-            print_result_block(domain, "UPSTREAM", "NOT_FOUND", "-", "-")
-        else:
-            stats["ERRORS"] += 1
-            print_result_block(domain, "UPSTREAM", "SERVER_ERROR", "-", "-")
+        domain_str, source, status, ip, ttl = resolve_domain(
+            user_input, cfg, ad_domains, sanction_domains, cache, stats, router, ad_cache, query_fn
+        )
+        print_result_block(domain_str, source, status, ip, ttl)
 
 
 if __name__ == "__main__":
