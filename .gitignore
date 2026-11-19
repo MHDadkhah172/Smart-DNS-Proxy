@@ -6,3 +6,7 @@ __pycache__/
 log.txt
 src/log.txt
 *.log
+
+*.db
+*.db-wal
+*.db-shm
