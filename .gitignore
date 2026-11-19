@@ -4,4 +4,5 @@ __pycache__/
 *.pyc
 
 log.txt
+src/log.txt
 *.log
