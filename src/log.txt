@@ -26,3 +26,17 @@
 2026-11-18 08:28:20 | wikipedia.org | UPSTREAM | OK | 185.15.59.224 | 180
 2026-11-18 08:28:23 | wikipedia.org | CACHE | OK | 185.15.59.224 | 176
 2026-11-18 08:28:29 | python.org | UPSTREAM | OK | 151.101.192.223 | 300
+2026-11-18 08:31:21 | ads.pubmatic.com | AD_BLOCK | OK | 0.0.0.0 | 60
+2026-11-18 08:31:45 | ads.pubmatic.com | AD_BLOCK | OK | 0.0.0.0 | 60
+2026-11-18 08:32:38 | ads.pubmatic.com | AD_BLOCK | OK | 0.0.0.0 | 60
+2026-11-19 14:45:21 | www.google.com | UPSTREAM | OK | 216.239.38.120 | 1
+2026-11-19 14:45:26 | www.google.com | UPSTREAM | OK | 216.239.38.120 | 1
+2026-11-19 14:45:34 | www.google.com | UPSTREAM | OK | 216.239.38.120 | 1
+2026-11-19 14:45:34 | www.google.com | UPSTREAM | OK | 216.239.38.120 | 1
+2026-11-19 14:45:46 | www.github.com | UPSTREAM | OK | 140.82.121.4 | 4
+2026-11-19 14:45:49 | www.github.com | UPSTREAM | OK | 140.82.121.4 | 60
+2026-11-19 14:45:51 | www.github.com | CACHE | OK | 140.82.121.4 | 58
+2026-11-19 14:46:01 | ali | UPSTREAM | NOT_FOUND | - | -
+2026-11-19 14:46:20 | www.github.com | CACHE | OK | 140.82.121.4 | 29
+2026-11-19 15:04:42 | www.google.com | UPSTREAM | OK | 216.239.38.120 | 1
+2026-11-19 15:05:00 | smart_state | NONE | INVALID_INPUT | - | -

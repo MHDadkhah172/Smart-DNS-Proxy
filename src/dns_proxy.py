@@ -298,7 +298,8 @@ def main():
             continue
 
         if cmd == "smart_stats":
-            print("Latencies (ms):", {k: round(v, 2) for k, v in router.latencies.items()})
+            sorted_lat = dict(sorted(router.latencies.items(), key=lambda x: x[1]))
+            print("Latencies (ms):", {k: round(v, 2) for k, v in sorted_lat.items()})
             print("User Hits:", ad_cache.hits)
             print()
             continue
