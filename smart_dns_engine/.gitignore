@@ -1,0 +1,12 @@
+﻿.venv/
+.idea/
+__pycache__/
+*.pyc
+
+log.txt
+src/log.txt
+*.log
+
+*.db
+*.db-wal
+*.db-shm
