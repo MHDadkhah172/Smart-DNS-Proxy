@@ -11,8 +11,9 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from config import load_config
+from dns_engine.engine_router import SmartEngineRouter
 from domain_loader import is_valid_domain, load_domain_list, normalize_domain
-from smart_modules import AdaptiveAdCache, RemoteBlocklistSync, UpstreamRouter
+from smart_modules import RemoteBlocklistSync, UpstreamRouter
 
 
 def is_domain_matched(domain, domain_set):
@@ -53,8 +54,8 @@ def query_text_upstream(domain, upstream_ip, upstream_port, timeout_sec):
 
 def query_real_dns(domain, upstream_ip, upstream_port, timeout_sec):
     """Real binary DNS query over UDP (e.g., 8.8.8.8:53)."""
-    tx_id = b"\x1a\x2b"
-    flags = b"\x01\x00"  # Standard recursive query
+    tx_id = os.urandom(2)
+    flags = b"\x01\x00"
     counts = b"\x00\x01\x00\x00\x00\x00\x00\x00"
     qname = b"".join(bytes([len(p)]) + p.encode("utf-8") for p in domain.split(".")) + b"\x00"
     packet = tx_id + flags + counts + qname + b"\x00\x01\x00\x01"
@@ -68,7 +69,7 @@ def query_real_dns(domain, upstream_ip, upstream_port, timeout_sec):
             return "SERVER_ERROR", "-", "-"
 
         rcode = resp[3] & 0x0F
-        if rcode == 3:  # NXDOMAIN
+        if rcode == 3:
             return "NOT_FOUND", "-", "-"
         if rcode != 0:
             return "SERVER_ERROR", "-", "-"
@@ -77,13 +78,11 @@ def query_real_dns(domain, upstream_ip, upstream_port, timeout_sec):
         if ancount == 0:
             return "NOT_FOUND", "-", "-"
 
-        # Skip Question section
         idx = 12
         while idx < len(resp) and resp[idx] != 0:
             idx += 1 + resp[idx]
         idx += 5
 
-        # Parse Answer records to find first Type-A (IPv4)
         for _ in range(ancount):
             if idx >= len(resp):
                 break
@@ -129,19 +128,8 @@ def print_result_block(domain_str, source, status, ip, ttl):
     append_log(domain_str, source, status, ip, ttl)
 
 
-def resolve_domain(
-    raw_domain,
-    cfg,
-    ad_domains,
-    sanction_domains,
-    cache,
-    stats,
-    router,
-    ad_cache,
-    query_fn,
-    session_id=None,
-):
-    """Core resolution pipeline usable by both CLI loop and multi-user simulator."""
+def resolve_domain(raw_domain, cfg, ad_domains, sanction_domains, cache, stats, router, query_fn):
+    """Core resolution pipeline."""
     stats["Total"] += 1
 
     if not is_valid_domain(raw_domain):
@@ -151,18 +139,14 @@ def resolve_domain(
 
     domain = normalize_domain(raw_domain)
 
-    # 1. Ad list check (L1 Hot Cache first, then full synced ad_domains)
-    if ad_cache.is_hot_ad(domain, session_id=session_id) or is_domain_matched(domain, ad_domains):
-        ad_cache.promote(domain, session_id=session_id)
+    if is_domain_matched(domain, ad_domains):
         stats["AD_BLOCK"] += 1
         return domain, "AD_BLOCK", "OK", cfg["sinkhole_ip"], cfg["local_ttl"]
 
-    # 2. Sanction list check
     if is_domain_matched(domain, sanction_domains):
         stats["SANCTION"] += 1
         return domain, "SANCTION", "OK", cfg["proxy_ip"], cfg["local_ttl"]
 
-    # 3. Cache check (if enabled)
     now = time.time()
     if cfg["cache_enabled"] and domain in cache:
         cached_ip, expire_time = cache[domain]
@@ -172,7 +156,6 @@ def resolve_domain(
             return domain, "CACHE", "OK", cached_ip, rem_ttl
         del cache[domain]
 
-    # 4. Upstream query via Smart Latency-Aware Pool
     status, ip, ttl = router.query_smart_pool(
         domain, query_fn, cfg["upstream_port"], cfg["upstream_timeout_sec"]
     )
@@ -182,7 +165,7 @@ def resolve_domain(
         if cfg["cache_enabled"] and isinstance(ttl, int) and ttl > 0:
             max_cap = cfg["cache_max_entries"]
             if max_cap is not None and domain not in cache and len(cache) >= max_cap:
-                cache.popitem(last=False)  # FIFO eviction
+                cache.popitem(last=False)
             cache[domain] = (ip, time.time() + ttl)
         return domain, "UPSTREAM", "OK", ip, ttl
 
@@ -192,6 +175,34 @@ def resolve_domain(
 
     stats["ERRORS"] += 1
     return domain, "UPSTREAM", "SERVER_ERROR", "-", "-"
+
+
+def print_engine_dashboard(router):
+    """Display live DNS engine metrics table in CLI."""
+    if not isinstance(router, SmartEngineRouter):
+        print("Smart DNS Engine is inactive.\n")
+        return
+
+    status = router.get_selector_status()
+    rows = router.get_dashboard_rows()
+    print(f"Selector State -> Last Switch Reason: {status['last_switch_reason']}")
+    print(
+        f"{'ROLE':<10} | {'NAME':<18} | {'IP':<15} | {'AVG(ms)':<8} | "
+        f"{'P95(ms)':<8} | {'JITTER':<7} | {'SUCC%':<6} | {'SCORE':<6}"
+    )
+    print("-" * 92)
+    for r in rows:
+        avg_lat = f"{r['avg_latency']:.1f}" if r["avg_latency"] is not None else "-"
+        p95_val = f"{r['p95']:.1f}" if r["p95"] is not None else "-"
+        jit_val = f"{r['jitter']:.1f}" if r["jitter"] is not None else "-"
+        succ_val = f"{r['success_rate'] * 100:.0f}%" if r["success_rate"] is not None else "-"
+        score_val = f"{r['score']:.2f}" if r["score"] is not None else "-"
+        role_val = r["role"] or "CANDIDATE"
+        print(
+            f"{role_val:<10} | {r['name']:<18} | {r['ip']:<15} | {avg_lat:<8} | "
+            f"{p95_val:<8} | {jit_val:<7} | {succ_val:<6} | {score_val:<6}"
+        )
+    print()
 
 
 def main():
@@ -205,14 +216,15 @@ def main():
 
     query_fn = query_real_dns if cfg["real_dns_enabled"] else query_text_upstream
 
-    # 1. Initialize Smart Upstream Router & benchmark at startup
     pool_raw = cfg.get("upstream_pool", cfg["upstream_ip"])
     pool = [s.strip() for s in pool_raw.split(",") if s.strip()]
-    router = UpstreamRouter(pool)
     if cfg["real_dns_enabled"]:
-        router.benchmark_all(query_fn=query_fn, port=cfg["upstream_port"], timeout=1.5)
+        db_path = os.path.join(ROOT_DIR, "dns_engine.db")
+        router = SmartEngineRouter(pool_ips=pool, db_path=db_path, probe_interval_sec=60.0)
+        router.start()
+    else:
+        router = UpstreamRouter(pool)
 
-    # 2. Initialize Remote Blocklist Sync (initial sync + 24h background thread)
     remote_syncer = RemoteBlocklistSync(
         url=cfg.get("remote_ad_list_url", "").strip(),
         validator_fn=is_valid_domain,
@@ -222,20 +234,13 @@ def main():
         remote_syncer.sync_now(ad_domains)
         remote_syncer.start_background_sync(ad_domains)
 
-    # 3. Initialize Multi-Session Adaptive Ad Cache
-    ad_cache = AdaptiveAdCache(
-        enabled=str(cfg.get("context_ads_enabled", "false")).lower() == "true"
-    )
-
     cache = OrderedDict()
-    stats = {
-        "Total": 0,
-        "AD_BLOCK": 0,
-        "SANCTION": 0,
-        "CACHE": 0,
-        "UPSTREAM": 0,
-        "ERRORS": 0,
-    }
+    stats = {"Total": 0, "AD_BLOCK": 0, "SANCTION": 0, "CACHE": 0, "UPSTREAM": 0, "ERRORS": 0}
+
+    def shutdown():
+        remote_syncer.stop()
+        if isinstance(router, SmartEngineRouter):
+            router.stop()
 
     print("DNS Proxy ready.")
 
@@ -243,7 +248,7 @@ def main():
         try:
             raw_line = input("Enter domain (or exit): ")
         except EOFError:
-            remote_syncer.stop()
+            shutdown()
             print("Bye.")
             break
 
@@ -251,7 +256,7 @@ def main():
         cmd = user_input.lower()
 
         if cmd == "exit":
-            remote_syncer.stop()
+            shutdown()
             print("Bye.")
             break
 
@@ -270,7 +275,6 @@ def main():
                 sanction_domains = load_domain_list(cfg["sanction_list_file"])
                 if remote_syncer.url:
                     remote_syncer.sync_now(ad_domains)
-                ad_cache.clear_all()
                 print("Lists reloaded.")
             except ValueError as e:
                 print(e)
@@ -292,20 +296,17 @@ def main():
             print()
             continue
 
-        if cmd.startswith("user "):
-            ad_cache.switch_session(user_input.split(" ", 1)[1])
-            print(f"Switched session to: {ad_cache.current_session}\n")
-            continue
-
-        if cmd == "smart_stats":
-            sorted_lat = dict(sorted(router.latencies.items(), key=lambda x: x[1]))
-            print("Latencies (ms):", {k: round(v, 2) for k, v in sorted_lat.items()})
-            print("User Hits:", ad_cache.hits)
-            print()
+        if cmd in ("engine", "smart_stats"):
+            if isinstance(router, SmartEngineRouter):
+                print_engine_dashboard(router)
+            else:
+                sorted_lat = dict(sorted(router.latencies.items(), key=lambda x: x[1]))
+                print("Latencies (ms):", {k: round(v, 2) for k, v in sorted_lat.items()})
+                print()
             continue
 
         domain_str, source, status, ip, ttl = resolve_domain(
-            user_input, cfg, ad_domains, sanction_domains, cache, stats, router, ad_cache, query_fn
+            user_input, cfg, ad_domains, sanction_domains, cache, stats, router, query_fn
         )
         print_result_block(domain_str, source, status, ip, ttl)
 
