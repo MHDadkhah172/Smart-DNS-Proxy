@@ -1,3 +1,4 @@
 ads.example.com
 tracker.example.net
 both.example.com
+hp.com

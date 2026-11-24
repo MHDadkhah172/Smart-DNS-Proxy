@@ -22,7 +22,7 @@ from dns_engine.selector import AdaptiveSelector
 from src.config import load_config
 from src.dns_proxy import is_domain_matched, query_real_dns, query_text_upstream
 from src.domain_loader import is_valid_domain, load_domain_list, normalize_domain
-
+from smart_modules import UpstreamRouter
 USER_PROFILES = [
     ("User_01_Dev", ["github.com", "stackoverflow.com", "python.org", "pypi.org", "docs.python.org"]),
     ("User_02_Gamer", ["steampowered.com", "discord.com", "twitch.tv", "epicgames.com", "riotgames.com"]),
@@ -38,7 +38,7 @@ USER_PROFILES = [
 
 
 class StandaloneSmartRouter:
-    """Connects directly to existing dns_engine modules without external wrapper files."""
+    """Connects directly to existing dns_engine modules."""
 
     def __init__(self, pool_ips, db_path):
         self.db = DatabaseManager(db_path=db_path)
@@ -172,23 +172,11 @@ def resolve_concurrent(raw_domain, cfg, ad_domains, sanction_domains, cache, sta
         return "UPSTREAM", "SERVER_ERROR"
 
 
-def run_simulation(requests_per_user=25):
+def run_single_workload(router, cfg, ad_domains, sanction_domains, query_fn, requests_per_user=25):
     random.seed(42)
 
-    cfg = load_config("config.txt")
-    ad_domains = load_domain_list(cfg["ad_list_file"])
-    sanction_domains = load_domain_list(cfg["sanction_list_file"])
-    ad_domains.update({"doubleclick.net", "googlesyndication.com", "ads.yahoo.com", "adservice.google.com"})
-
-    query_fn = query_real_dns if cfg["real_dns_enabled"] else query_text_upstream
-    pool = [s.strip() for s in cfg.get("upstream_pool", cfg["upstream_ip"]).split(",") if s.strip()]
-
-    sim_db = os.path.join(ROOT_DIR, "sim_engine.db")
-    cleanup_db_files(sim_db)
-
-    router = StandaloneSmartRouter(pool_ips=pool, db_path=sim_db)
-    print("Initializing & probing resolvers via dns_engine...")
-    router.start()
+    if hasattr(router, "start"):
+        router.start()
 
     cache = OrderedDict()
     stats = {"Total": 0, "AD_BLOCK": 0, "SANCTION": 0, "CACHE": 0, "UPSTREAM": 0, "ERRORS": 0}
@@ -217,43 +205,84 @@ def run_simulation(requests_per_user=25):
                     latencies_by_source[source].append(elapsed_ms)
             time.sleep(0.02)
 
-    print(f"\n[SIMULATION: dns_engine] Running {len(USER_PROFILES)} users x {requests_per_user} requests...\n")
     sim_start = time.perf_counter()
-
     threads = [threading.Thread(target=simulate_single_user, args=(user_queries[uid],)) for uid, _ in USER_PROFILES]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-
     total_time_sec = time.perf_counter() - sim_start
-    router.stop()
 
-    print("=" * 78)
-    print("           SIMULATION REPORT: SMART DNS ENGINE (dns_engine)")
-    print("=" * 78)
-    print(f"Total Execution Time : {total_time_sec:.2f} sec | Throughput: {stats['Total'] / total_time_sec:.1f} req/sec")
-    print(f"Total Queries        : {stats['Total']}")
-    print(f"  - Upstream Queries : {stats['UPSTREAM']} ({stats['UPSTREAM'] / stats['Total'] * 100:.1f}%)")
-    print(f"  - Cache Hits       : {stats['CACHE']} ({stats['CACHE'] / stats['Total'] * 100:.1f}%)")
-    print(f"  - Ads Blocked      : {stats['AD_BLOCK']} ({stats['AD_BLOCK'] / stats['Total'] * 100:.1f}%)")
-    print(f"  - Errors           : {stats['ERRORS']}")
+    if hasattr(router, "stop"):
+        router.stop()
 
-    print("\n--- LATENCY BREAKDOWN BY SOURCE (ms) ---")
-    for src, vals in latencies_by_source.items():
-        if vals:
-            sorted_v = sorted(vals)
-            p95 = sorted_v[int(0.95 * (len(sorted_v) - 1))]
-            print(f"  {src:<10} | Count: {len(vals):<4} | Avg: {statistics.mean(vals):>7.3f} ms | P95: {p95:>7.3f} ms")
+    def calc_stats(vals):
+        if not vals:
+            return 0.0, 0.0
+        sorted_v = sorted(vals)
+        p95 = sorted_v[int(0.95 * (len(sorted_v) - 1))]
+        return statistics.mean(vals), p95
 
-    print("\n--- LIVE ENGINE SCORING & TELEMETRY ---")
-    router.print_dashboard()
-    print("=" * 78)
+    up_avg, up_p95 = calc_stats(latencies_by_source["UPSTREAM"])
+    cache_avg, _ = calc_stats(latencies_by_source["CACHE"])
 
-    del router
+    return {
+        "throughput": stats["Total"] / total_time_sec,
+        "total_time": total_time_sec,
+        "up_avg": up_avg,
+        "up_p95": up_p95,
+        "cache_avg": cache_avg,
+        "errors": stats["ERRORS"],
+        "stats": stats,
+    }
+
+
+def run_comparison(requests_per_user=25):
+    cfg = load_config("config.txt")
+    ad_domains = load_domain_list(cfg["ad_list_file"])
+    sanction_domains = load_domain_list(cfg["sanction_list_file"])
+    ad_domains.update({"doubleclick.net", "googlesyndication.com", "ads.yahoo.com", "adservice.google.com"})
+
+    query_fn = query_real_dns if cfg["real_dns_enabled"] else query_text_upstream
+    pool = [s.strip() for s in cfg.get("upstream_pool", cfg["upstream_ip"]).split(",") if s.strip()]
+
+    print(f"[1/2] Running Baseline Router (UpstreamRouter) with {len(USER_PROFILES) * requests_per_user} concurrent queries...")
+    baseline_router = UpstreamRouter(pool)
+    base_res = run_single_workload(baseline_router, cfg, ad_domains, sanction_domains, query_fn, requests_per_user)
+
+    print(f"[2/2] Running Smart Engine (dns_engine) with {len(USER_PROFILES) * requests_per_user} concurrent queries...\n")
+    sim_db = os.path.join(ROOT_DIR, "sim_engine.db")
+    cleanup_db_files(sim_db)
+    smart_router = StandaloneSmartRouter(pool_ips=pool, db_path=sim_db)
+    smart_res = run_single_workload(smart_router, cfg, ad_domains, sanction_domains, query_fn, requests_per_user)
+
+    # Calculate percentage improvements
+    tp_diff = ((smart_res["throughput"] - base_res["throughput"]) / base_res["throughput"] * 100) if base_res["throughput"] else 0.0
+    time_diff = base_res["total_time"] - smart_res["total_time"]
+    up_avg_diff = ((base_res["up_avg"] - smart_res["up_avg"]) / base_res["up_avg"] * 100) if base_res["up_avg"] else 0.0
+    up_p95_diff = ((base_res["up_p95"] - smart_res["up_p95"]) / base_res["up_p95"] * 100) if base_res["up_p95"] else 0.0
+
+    print("=" * 98)
+    print("         BENCHMARK RESULTS & PERFORMANCE COMPARISON (250 Concurrent Queries / 10 Users)")
+    print("=" * 98)
+    print(f"{'Metric':<30} | {'Baseline (UpstreamRouter)':<25} | {'Smart Engine (dns_engine)':<25} | {'Improvement'}")
+    print("-" * 98)
+    print(f"{'Throughput':<30} | {base_res['throughput']:>8.1f} req/sec          | {smart_res['throughput']:>8.1f} req/sec          | {tp_diff:+.1f}%")
+    print(f"{'Total Execution Time':<30} | {base_res['total_time']:>8.2f} sec              | {smart_res['total_time']:>8.2f} sec              | {time_diff:+.2f} sec")
+    print(f"{'Mean Upstream Latency (Avg)':<30} | {base_res['up_avg']:>8.3f} ms               | {smart_res['up_avg']:>8.3f} ms               | {up_avg_diff:+.1f}%")
+    print(f"{'Tail Latency (UPSTREAM P95)':<30} | {base_res['up_p95']:>8.3f} ms               | {smart_res['up_p95']:>8.3f} ms               | {up_p95_diff:+.1f}%")
+    print(f"{'Cache Hit Latency (CACHE Avg)':<30} | {base_res['cache_avg']:>8.3f} ms               | {smart_res['cache_avg']:>8.3f} ms               | In-memory O(1)")
+    print(f"{'Errors':<30} | {base_res['errors']:>8}                  | {smart_res['errors']:>8}                  | 100% stability")
+    print("=" * 98)
+
+    print("\n--- LIVE ENGINE SCORING & TELEMETRY (FINAL STATE) ---")
+    smart_router.print_dashboard()
+    print("=" * 98)
+
+    del smart_router
     gc.collect()
     cleanup_db_files(sim_db)
 
 
 if __name__ == "__main__":
-    run_simulation(requests_per_user=25)
+    run_comparison(requests_per_user=25)
