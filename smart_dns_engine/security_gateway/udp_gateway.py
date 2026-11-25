@@ -60,8 +60,12 @@ class DNSUdpGateway:
             except OSError:
                 break
 
-            client_id = f"{addr[0]}:{addr[1]}"
-            self._handle_packet(packet, addr, client_id)
+            client_id = addr[0]
+            threading.Thread(
+                target=self._handle_packet,
+                args=(packet, addr, client_id),
+                daemon=True,
+            ).start()
 
     def _handle_packet(self, packet: bytes, addr: tuple[str, int], client_id: str) -> None:
         assert self._sock is not None

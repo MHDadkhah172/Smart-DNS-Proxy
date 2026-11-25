@@ -238,6 +238,11 @@ def main():
     cache = OrderedDict()
     stats = {"Total": 0, "AD_BLOCK": 0, "SANCTION": 0, "CACHE": 0, "UPSTREAM": 0, "ERRORS": 0}
 
+    # Enable ML Security Gateway on 127.0.0.1:15353
+    cfg["enable_security_gateway"] = "true"
+    cfg["gateway_host"] = "127.0.0.1"
+    cfg["gateway_port"] = 15353
+
     gw_controller = GatewayController(
         cfg=cfg,
         resolve_callback=lambda dom: resolve_domain(

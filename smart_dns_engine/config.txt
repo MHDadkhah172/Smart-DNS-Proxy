@@ -19,5 +19,5 @@ context_ads_enabled=true
 # Security Gateway Settings
 enable_security_gateway = true
 gateway_host = 127.0.0.1
-gateway_port = 5300
+gateway_port = 15353
 baseline_window_size = 20
