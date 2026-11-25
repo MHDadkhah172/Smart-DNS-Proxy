@@ -15,3 +15,9 @@ real_dns_enabled=true
 upstream_pool=1.1.1.1,8.8.8.8,9.9.9.9
 remote_ad_list_url=https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
 context_ads_enabled=true
+
+# Security Gateway Settings
+enable_security_gateway = true
+gateway_host = 127.0.0.1
+gateway_port = 5353
+baseline_window_size = 20

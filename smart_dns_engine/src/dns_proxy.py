@@ -13,6 +13,7 @@ if ROOT_DIR not in sys.path:
 from config import load_config
 from dns_engine.engine_router import SmartEngineRouter
 from domain_loader import is_valid_domain, load_domain_list, normalize_domain
+from security_gateway.bridge import GatewayController
 from smart_modules import RemoteBlocklistSync, UpstreamRouter
 
 
@@ -237,7 +238,17 @@ def main():
     cache = OrderedDict()
     stats = {"Total": 0, "AD_BLOCK": 0, "SANCTION": 0, "CACHE": 0, "UPSTREAM": 0, "ERRORS": 0}
 
+    gw_controller = GatewayController(
+        cfg=cfg,
+        resolve_callback=lambda dom: resolve_domain(
+            dom, cfg, ad_domains, sanction_domains, cache, stats, router, query_fn
+        ),
+        root_dir=ROOT_DIR,
+    )
+    gw_controller.start()
+
     def shutdown():
+        gw_controller.stop()
         remote_syncer.stop()
         if isinstance(router, SmartEngineRouter):
             router.stop()
@@ -259,6 +270,9 @@ def main():
             shutdown()
             print("Bye.")
             break
+
+        if gw_controller.handle_cli_command(user_input):
+            continue
 
         if cmd == "stats":
             print(
