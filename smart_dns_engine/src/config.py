@@ -99,6 +99,29 @@ def load_config(filepath="config.txt"):
         if srv and not is_valid_ipv4(srv):
             raise ValueError(f"Config error: invalid IP '{srv}' in upstream_pool.")
 
+    # Security Gateway Settings
+    sec_gw_str = raw_cfg.get("enable_security_gateway", "false").lower()
+    if sec_gw_str not in ("true", "false"):
+        raise ValueError("Config error: enable_security_gateway must be true or false.")
+
+    gateway_host = raw_cfg.get("gateway_host", "127.0.0.1").strip()
+    if not is_valid_ipv4(gateway_host):
+        raise ValueError("Config error: invalid gateway_host.")
+
+    try:
+        gateway_port = int(raw_cfg.get("gateway_port", "5353"))
+        if not (1 <= gateway_port <= 65535):
+            raise ValueError
+    except ValueError:
+        raise ValueError("Config error: invalid gateway_port.")
+
+    try:
+        baseline_window_size = int(raw_cfg.get("baseline_window_size", "20"))
+        if baseline_window_size < 1:
+            raise ValueError
+    except ValueError:
+        raise ValueError("Config error: invalid baseline_window_size.")
+
     return {
         "upstream_ip": raw_cfg["upstream_ip"],
         "upstream_port": upstream_port,
@@ -114,4 +137,8 @@ def load_config(filepath="config.txt"):
         "upstream_pool": upstream_pool,
         "remote_ad_list_url": raw_cfg.get("remote_ad_list_url", "").strip(),
         "context_ads_enabled": context_ads_str == "true",
+        "enable_security_gateway": sec_gw_str == "true",
+        "gateway_host": gateway_host,
+        "gateway_port": gateway_port,
+        "baseline_window_size": baseline_window_size,
     }
