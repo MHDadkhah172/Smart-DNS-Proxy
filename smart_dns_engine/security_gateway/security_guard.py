@@ -157,6 +157,10 @@ class SecurityGuard:
                 continue
 
             total = len(events)
+            if total < 3:
+                continue
+
+            total = len(events)
             domains = [e["domain"] for e in events]
             nx_count = sum(1 for e in events if e["status"] == "NOT_FOUND")
 

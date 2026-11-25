@@ -37,11 +37,11 @@ class AdaptiveAnomalyDetector:
         rng = np.random.default_rng(42)
         n_samples = 250
 
-        req_rate = rng.uniform(0.2, 8.0, size=n_samples)          # Normal browsing bursts
-        avg_entropy = rng.uniform(1.8, 3.3, size=n_samples)       # Standard readable domains
-        max_len = rng.uniform(10.0, 32.0, size=n_samples)         # Normal domain lengths
-        nx_ratio = rng.uniform(0.0, 0.12, size=n_samples)         # Low NXDOMAIN rate
-        unique_ratio = rng.uniform(0.2, 0.85, size=n_samples)     # Mix of repeated & new domains
+        req_rate = rng.uniform(0.1, 8.0, size=n_samples)  # Normal browsing bursts
+        avg_entropy = rng.uniform(1.5, 3.3, size=n_samples)  # Standard readable domains
+        max_len = rng.uniform(6.0, 32.0, size=n_samples)  # Normal domain lengths
+        nx_ratio = rng.uniform(0.0, 0.12, size=n_samples)  # Low NXDOMAIN rate
+        unique_ratio = rng.uniform(0.1, 1.0, size=n_samples)  # Mix of repeated & single domains
 
         normal_X = np.column_stack([req_rate, avg_entropy, max_len, nx_ratio, unique_ratio])
         self.model.fit(normal_X)
